@@ -13,8 +13,18 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Initialize Gemini AI
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Initialize Gemini AI with error handling
+let genAI = null;
+try {
+    if (process.env.GEMINI_API_KEY) {
+        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        console.log('✅ Gemini AI initialized');
+    } else {
+        console.log('⚠️ GEMINI_API_KEY not set, using fallback responses');
+    }
+} catch (error) {
+    console.log('⚠️ Gemini initialization failed, using fallback responses');
+}
 
 // Store conversations in memory (for production, use Redis or Database)
 // Structure: { sessionId: { history: [], lastActive: timestamp } }
@@ -99,7 +109,39 @@ NEVER EVER say things like:
 You are MAXMOVIES AI - a real digital assistant created by Max from Kenya. Own it! 🇰🇪💯
 `;
 
-// Generate a session ID (you can use a simple counter or UUID)
+// Fallback responses when Gemini is not available
+function getFallbackResponse(message) {
+    const lowerMsg = message.toLowerCase();
+    
+    if (lowerMsg.includes('niaje') || lowerMsg.includes('mambo') || lowerMsg.includes('sasa')) {
+        return "Mambo poa! 😎 I'm MaxMovies AI, created by Max (21yo tech engineer from Kenya). What movie you wanna watch today? 🎬";
+    }
+    if (lowerMsg.includes('who created you') || lowerMsg.includes('who made you')) {
+        return "Your boy Max built me from scratch! 💪 21-year-old tech engineer from Kenya 🇰🇪 Built me on 12th November 2025. I'm his masterpiece! 😎";
+    }
+    if (lowerMsg.includes('your name')) {
+        return "I'm MaxMovies AI! 🎬 Created by Max, the 21-year-old tech genius from Kenya. Nice to meet you! 😎";
+    }
+    if (lowerMsg.includes('where you from') || lowerMsg.includes('where are you from')) {
+        return "I'm from Kenya 🇰🇪! Built with love by Max, a Kenyan tech engineer. Proudly Kenyan-made! 💪";
+    }
+    if (lowerMsg.includes('movie') || lowerMsg.includes('film')) {
+        return "🔥 For a great movie, check out 'John Wick 4' - action is kubaya! Or 'Oppenheimer' if you want something deep. What genre you into? 🎬";
+    }
+    if (lowerMsg.includes('kenya') || lowerMsg.includes('kenyan')) {
+        return "🇰🇪 Kenyan movies are coming up! Check out 'Kati Kati' or 'Supa Modo' - both won international awards! Also our local music scene is fire! 🔥";
+    }
+    if (lowerMsg.includes('music') || lowerMsg.includes('song')) {
+        return "🎵 Kenyan music is lit right now! Check out Bien, Sauti Sol, Wakadinali, or Buruklyn Boyz. What genre you like? 🔥";
+    }
+    if (lowerMsg.includes('download') || lowerMsg.includes('stream')) {
+        return "📥 On MaxMovies app, you can stream or download any movie/series. Just click the download button next to quality selector! Sawa? 💯";
+    }
+    
+    return "Mambo! 😎 I'm MaxMovies AI, created by Max from Kenya 🇰🇪 Ask me about movies, series, music, or just vibe with me in Sheng! What's up today? 🎬";
+}
+
+// Generate a session ID
 function generateSessionId() {
     return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
@@ -148,7 +190,8 @@ app.get('/api/health', (req, res) => {
         creator: 'Max - 21yo Tech Engineer from Kenya 🇰🇪',
         birthDate: '12th November 2025',
         version: '2.0',
-        activeSessions: conversationStore.size
+        activeSessions: conversationStore.size,
+        geminiEnabled: !!genAI
     });
 });
 
@@ -213,76 +256,71 @@ app.post('/api/chat', async (req, res) => {
         let conversationHistory = [];
         
         if (sessionId) {
-            // Get existing conversation from server memory
             conversationHistory = getConversationHistory(sessionId);
         } else {
-            // Create new session
             sessionId = generateSessionId();
         }
         
-        // If client sent history, use it (for backward compatibility)
         if (clientHistory && clientHistory.length > 0 && conversationHistory.length === 0) {
             conversationHistory = clientHistory;
         }
         
-        // Add user message to history
         conversationHistory.push({ role: 'user', content: message });
         
-        // Initialize Gemini model
-        const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+        let aiResponse = '';
         
-        // Build conversation with system prompt and full history
-        let fullPrompt = MAXMOVIES_AI_PROMPT + '\n\n';
-        
-        // Add ALL conversation history for context (last 20 messages to avoid token limits)
-        const recentHistory = conversationHistory.slice(-20);
-        for (const msg of recentHistory) {
-            if (msg.role === 'user') {
-                fullPrompt += `User: ${msg.content}\n`;
-            } else if (msg.role === 'assistant') {
-                fullPrompt += `MaxMovies AI: ${msg.content}\n`;
+        // Try to use Gemini if available
+        if (genAI) {
+            try {
+                const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+                
+                let fullPrompt = MAXMOVIES_AI_PROMPT + '\n\n';
+                const recentHistory = conversationHistory.slice(-20);
+                for (const msg of recentHistory) {
+                    if (msg.role === 'user') {
+                        fullPrompt += `User: ${msg.content}\n`;
+                    } else if (msg.role === 'assistant') {
+                        fullPrompt += `MaxMovies AI: ${msg.content}\n`;
+                    }
+                }
+                fullPrompt += `User: ${message}\nMaxMovies AI:`;
+
+                const result = await model.generateContent(fullPrompt);
+                const response = await result.response;
+                aiResponse = response.text();
+
+                const forbiddenPhrases = [
+                    /As an AI language model[,:]?\s*/gi,
+                    /As an AI[,:]?\s*/gi,
+                    /I'm an AI[,:]?\s*/gi,
+                    /I am an AI[,:]?\s*/gi,
+                    /I was trained by Google[,:]?\s*/gi,
+                    /Google's Gemini[,:]?\s*/gi,
+                    /as a language model[,:]?\s*/gi,
+                    /I don't have personal[,:]?\s*/gi
+                ];
+                
+                for (const phrase of forbiddenPhrases) {
+                    aiResponse = aiResponse.replace(phrase, '');
+                }
+                
+                if (!aiResponse || aiResponse.trim() === '') {
+                    aiResponse = getFallbackResponse(message);
+                } else {
+                    aiResponse = aiResponse.trim();
+                }
+            } catch (geminiError) {
+                console.error('Gemini error:', geminiError);
+                aiResponse = getFallbackResponse(message);
             }
+        } else {
+            // Use fallback responses
+            aiResponse = getFallbackResponse(message);
         }
         
-        // Add current message
-        fullPrompt += `User: ${message}\nMaxMovies AI:`;
-
-        // Generate response
-        const result = await model.generateContent(fullPrompt);
-        const response = await result.response;
-        let aiResponse = response.text();
-
-        // Clean up any unwanted phrases
-        const forbiddenPhrases = [
-            /As an AI language model[,:]?\s*/gi,
-            /As an AI[,:]?\s*/gi,
-            /I'm an AI[,:]?\s*/gi,
-            /I am an AI[,:]?\s*/gi,
-            /I was trained by Google[,:]?\s*/gi,
-            /Google's Gemini[,:]?\s*/gi,
-            /as a language model[,:]?\s*/gi,
-            /I don't have personal[,:]?\s*/gi
-        ];
-        
-        for (const phrase of forbiddenPhrases) {
-            aiResponse = aiResponse.replace(phrase, '');
-        }
-        
-        // Ensure response isn't empty
-        if (!aiResponse || aiResponse.trim() === '') {
-            aiResponse = "Poa! Let me think about that... 😎 " + message;
-        }
-        
-        // Clean response
-        aiResponse = aiResponse.trim();
-        
-        // Add AI response to history
         conversationHistory.push({ role: 'assistant', content: aiResponse });
-        
-        // Save updated history
         saveConversationHistory(sessionId, conversationHistory);
         
-        // Return response with session ID
         res.json({
             success: true,
             response: aiResponse,
@@ -293,17 +331,6 @@ app.post('/api/chat', async (req, res) => {
 
     } catch (error) {
         console.error('Chat error:', error);
-        
-        // Handle safety errors
-        if (error.message?.includes('SAFETY')) {
-            return res.status(200).json({
-                success: true,
-                response: "Eh, that topic is a bit sensitive bana 😅 Let's talk about movies instead! 🎬 What's your favorite genre?",
-                timestamp: new Date().toISOString()
-            });
-        }
-        
-        // Handle other errors
         res.status(500).json({
             success: false,
             error: 'Server error',
@@ -321,47 +348,55 @@ app.post('/api/movie-info', async (req, res) => {
             return res.status(400).json({ error: 'Movie name required' });
         }
 
-        const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+        let info = '';
         
-        // Get conversation context if session provided
-        let context = '';
-        if (sessionId && conversationStore.has(sessionId)) {
-            const history = conversationStore.get(sessionId).history;
-            const recentMessages = history.slice(-6);
-            for (const msg of recentMessages) {
-                if (msg.role === 'user') {
-                    context += `User previously asked: ${msg.content}\n`;
+        if (genAI) {
+            try {
+                const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+                
+                let context = '';
+                if (sessionId && conversationStore.has(sessionId)) {
+                    const history = conversationStore.get(sessionId).history;
+                    const recentMessages = history.slice(-6);
+                    for (const msg of recentMessages) {
+                        if (msg.role === 'user') {
+                            context += `User previously asked: ${msg.content}\n`;
+                        }
+                    }
                 }
+                
+                const prompt = `${MAXMOVIES_AI_PROMPT}\n\n${context}User: Tell me about the movie "${movieName}". Give me: title, year, director, main cast, genre, brief plot (2 sentences), and rating. Be precise and concise. Don't mention being an AI.\n\nMaxMovies AI:`;
+                
+                const result = await model.generateContent(prompt);
+                const response = await result.response;
+                info = response.text();
+                
+                const forbiddenPhrases = [
+                    /As an AI language model[,:]?\s*/gi,
+                    /As an AI[,:]?\s*/gi,
+                    /I'm an AI[,:]?\s*/gi
+                ];
+                
+                for (const phrase of forbiddenPhrases) {
+                    info = info.replace(phrase, '');
+                }
+                info = info.trim();
+            } catch (geminiError) {
+                info = `🎬 ${movieName} is a great film! I'd recommend checking it out on MaxMovies app. Want me to suggest similar movies? 🔥`;
             }
-        }
-        
-        const prompt = `${MAXMOVIES_AI_PROMPT}\n\n${context}User: Tell me about the movie "${movieName}". Give me: title, year, director, main cast, genre, brief plot (2 sentences), and rating. Be precise and concise. Don't mention being an AI.\n\nMaxMovies AI:`;
-        
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        let info = response.text();
-        
-        // Clean up
-        const forbiddenPhrases = [
-            /As an AI language model[,:]?\s*/gi,
-            /As an AI[,:]?\s*/gi,
-            /I'm an AI[,:]?\s*/gi
-        ];
-        
-        for (const phrase of forbiddenPhrases) {
-            info = info.replace(phrase, '');
+        } else {
+            info = `🎬 ${movieName} is a great film! I'd recommend checking it out on MaxMovies app. Want me to suggest similar movies? 🔥`;
         }
         
         res.json({
             success: true,
-            info: info.trim(),
+            info: info,
             sessionId: sessionId || null
         });
     } catch (error) {
         console.error('Movie info error:', error);
-        res.status(500).json({ 
+        res.json({ 
             success: false, 
-            error: 'Failed to fetch movie info',
             info: "Sorry bana, I couldn't fetch that movie info 😅 Try again?"
         });
     }
@@ -392,6 +427,7 @@ app.listen(PORT, () => {
     console.log(`📅 Built on 12th November 2025`);
     console.log(`🎬 Name: MaxMovies AI`);
     console.log(`💾 Conversation memory enabled - sessions stored in memory`);
+    console.log(`🤖 Gemini AI: ${genAI ? 'Enabled ✅' : 'Disabled (using fallback) ⚠️'}`);
 });
 
 module.exports = app;
